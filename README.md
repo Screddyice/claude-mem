@@ -395,6 +395,11 @@ capacity. Both epoch-second and epoch-millisecond reset times are supported.
 Current rejections and utilization safeguards still pause the observer; incoming
 observations remain queued during its retry cooldown.
 
+The pending compression buffer lives in memory. A worker restart clears that
+buffer; saved observations remain in SQLite, and unprocessed activity requires
+recovery from the original session transcripts. Do not restart merely to clear
+a genuine quota cooldown.
+
 If experiencing issues, describe the problem to Claude and the troubleshoot skill will automatically diagnose and provide fixes.
 
 See the **[Troubleshooting Guide](https://docs.claude-mem.ai/troubleshooting)** for common issues and solutions.
