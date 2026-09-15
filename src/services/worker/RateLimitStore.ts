@@ -45,6 +45,10 @@ export interface RateLimitInfo {
   overageResetsAt?: number;
   isUsingOverage?: boolean;
   surpassedThreshold?: number;
+  unifiedWindows?: Partial<Record<RateLimitWindow, {
+    utilization?: number;
+    resetsAt?: number;
+  }>>;
 }
 
 export interface RateLimitEntry extends RateLimitInfo {
@@ -65,7 +69,26 @@ export class RateLimitStore {
     if (!info || typeof info !== 'object') return false;
     const key: RateLimitBucketKey = info.rateLimitType ?? 'default';
     const previous = this.entries.get(key);
-    this.entries.set(key, { ...info, observedAt: Date.now() });
+    const observedAt = Date.now();
+    // A weekly event can also report a refreshed five-hour window. Replacing
+    // those snapshots prevents an old rejection from surviving a reset.
+    for (const window of Object.keys(UTILIZATION_THRESHOLDS) as RateLimitWindow[]) {
+      const snapshot = info.unifiedWindows?.[window];
+      if (!snapshot || typeof snapshot.utilization !== 'number' ||
+          !Number.isFinite(snapshot.utilization) || snapshot.utilization < 0 ||
+          toEpochMs(snapshot.resetsAt) === undefined) continue;
+      this.entries.set(window, {
+        rateLimitType: window,
+        utilization: snapshot.utilization,
+        resetsAt: snapshot.resetsAt,
+        status: snapshot.utilization >= 1 ? 'rejected' : 'allowed',
+        observedAt,
+      });
+    }
+    // The event's explicit status wins for its named window. Fill missing
+    // utilization/reset fields from this event only, never from older state.
+    const snapshot = info.rateLimitType ? info.unifiedWindows?.[info.rateLimitType] : undefined;
+    this.entries.set(key, { ...snapshot, ...info, observedAt });
     return isNewRejection(previous, info);
   }
 
@@ -145,9 +168,14 @@ export function isNewRejection(
  * documents epoch ms, so anything too small to be ms is treated as seconds.
  */
 export function minutesUntilReset(resetsAt: number | undefined, now: number = Date.now()): number | undefined {
-  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return undefined;
-  const resetsAtMs = resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
+  const resetsAtMs = toEpochMs(resetsAt);
+  if (resetsAtMs === undefined) return undefined;
   return Math.max(0, Math.round((resetsAtMs - now) / 60_000));
+}
+
+function toEpochMs(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return value < 1e12 ? value * 1000 : value;
 }
 
 /**
@@ -216,6 +244,10 @@ export function shouldAbortForQuota(
   for (const window of windows) {
     const entry = store.get(window);
     if (!entry) continue;
+    const resetsAtMs = toEpochMs(entry.resetsAt);
+    // Rejections and utilization belong to the window that produced them.
+    // Once it ends, let a new request establish the current quota state.
+    if (resetsAtMs !== undefined && resetsAtMs <= now) continue;
 
     const util = entry.utilization;
     const threshold = UTILIZATION_THRESHOLDS[window];
@@ -253,11 +285,11 @@ export function shouldAbortForQuota(
     // bailing on a window that just reset to ~0%.
     if (
       window === 'five_hour' &&
-      typeof entry.resetsAt === 'number' &&
+      resetsAtMs !== undefined &&
       typeof util === 'number' &&
       util >= RESET_GRACE_UTILIZATION_FLOOR
     ) {
-      const msUntilReset = entry.resetsAt - now;
+      const msUntilReset = resetsAtMs - now;
       if (msUntilReset > 0 && msUntilReset <= RESET_GRACE_MS) {
         return {
           abort: true,

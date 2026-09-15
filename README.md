@@ -386,6 +386,15 @@ See the **[Development Guide](https://docs.claude-mem.ai/development)** for buil
 
 ## Troubleshooting
 
+### Observer reports exhausted quota after a reset
+
+The subscription quota guard expires snapshots when their reset time passes and
+refreshes each window from the SDK's `unifiedWindows` snapshot. This lets memory
+processing recover when a new weekly event also reports available five-hour
+capacity. Both epoch-second and epoch-millisecond reset times are supported.
+Current rejections and utilization safeguards still pause the observer; incoming
+observations remain queued during its retry cooldown.
+
 If experiencing issues, describe the problem to Claude and the troubleshoot skill will automatically diagnose and provide fixes.
 
 See the **[Troubleshooting Guide](https://docs.claude-mem.ai/troubleshooting)** for common issues and solutions.

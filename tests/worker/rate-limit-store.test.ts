@@ -22,6 +22,61 @@ function freshStore(): RateLimitStore {
   return new RateLimitStore();
 }
 
+describe('quota recovery from stale snapshots', () => {
+  it.each([FIXED_NOW - 1, (FIXED_NOW - 1000) / 1000, FIXED_NOW])(
+    'does not abort on a rejection after its reset (%s)', (resetsAt) => {
+      const store = freshStore();
+      store.set({ rateLimitType: 'five_hour', status: 'rejected', utilization: 1, resetsAt });
+      expect(shouldAbortForQuota('cli', store, FIXED_NOW).abort).toBe(false);
+    },
+  );
+
+  it('replaces an old five-hour rejection with the new unified snapshot', () => {
+    const store = freshStore();
+    store.set({ rateLimitType: 'five_hour', status: 'rejected', overageStatus: 'rejected',
+      resetsAt: (FIXED_NOW + 60_000) / 1000 });
+    store.set({
+      rateLimitType: 'seven_day', status: 'allowed_warning', utilization: 0.70,
+      unifiedWindows: {
+        five_hour: { utilization: 0.46, resetsAt: (FIXED_NOW + 3_600_000) / 1000 },
+        seven_day: { utilization: 0.70, resetsAt: (FIXED_NOW + 86_400_000) / 1000 },
+      },
+    });
+    expect(shouldAbortForQuota('cli', store, FIXED_NOW).abort).toBe(false);
+    expect(store.getMostRecentByWindow().five_hour?.utilization).toBe(0.46);
+    expect(store.getMostRecentByWindow().five_hour?.overageStatus).toBeUndefined();
+  });
+
+  it('still protects an exhausted window reported only in unifiedWindows', () => {
+    const store = freshStore();
+    store.set({ rateLimitType: 'seven_day', status: 'allowed_warning', utilization: 0.70,
+      unifiedWindows: { five_hour: { utilization: 0.96, resetsAt: (FIXED_NOW + 3_600_000) / 1000 } } });
+    expect(shouldAbortForQuota('cli', store, FIXED_NOW).window).toBe('five_hour');
+  });
+
+  it('preserves an explicit current rejection over its unified utilization', () => {
+    const store = freshStore();
+    store.set({ rateLimitType: 'five_hour', status: 'rejected', resetsAt: (FIXED_NOW + 3_600_000) / 1000,
+      unifiedWindows: { five_hour: { utilization: 0.46, resetsAt: (FIXED_NOW + 3_600_000) / 1000 } } });
+    expect(shouldAbortForQuota('cli', store, FIXED_NOW).abort).toBe(true);
+  });
+
+  it('does not clear an unexpired rejection from incomplete unified data', () => {
+    const store = freshStore();
+    store.set({ rateLimitType: 'five_hour', status: 'rejected', resetsAt: FIXED_NOW + 3_600_000 });
+    store.set({ rateLimitType: 'seven_day', status: 'allowed',
+      unifiedWindows: { five_hour: { resetsAt: FIXED_NOW + 3_600_000 } } });
+    expect(shouldAbortForQuota('cli', store, FIXED_NOW).abort).toBe(true);
+  });
+
+  it('uses epoch seconds for the near-reset grace period', () => {
+    const store = freshStore();
+    store.set({ rateLimitType: 'five_hour', status: 'allowed_warning', utilization: 0.90,
+      resetsAt: (FIXED_NOW + 600_000) / 1000 });
+    expect(shouldAbortForQuota('cli', store, FIXED_NOW).abort).toBe(true);
+  });
+});
+
 describe('RateLimitStore', () => {
   it('records and retrieves entries by rateLimitType', () => {
     const store = freshStore();
